@@ -1,0 +1,62 @@
+# Variables de entorno
+.env
+.env.local
+.env.*.local
+
+# Secrets de Streamlit (nunca subir al repo)
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Entornos virtuales
+venv/
+.venv/
+env/
+.env/
+ENV/
+
+# Distribución / instalación
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Archivos de audio descargados
+*.wav
+*.mp3
+*.m4a
+*.webm
+*.opus
+*.ogg
+*.flac
+
+# Cache de transcripciones (local, no subir)
+.timestamptube/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Sistema operativo
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+ehthumbs.db
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log
