@@ -467,13 +467,30 @@ def descargar_audio_youtube(url: str, output_dir: str, on_progreso=None) -> str:
             os.unlink(cookies_file)
 
 
+def _encontrar_ffmpeg() -> str:
+    """Busca ffmpeg en el PATH y en rutas comunes de Mac y Linux."""
+    import shutil
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg:
+        return ffmpeg
+    for ruta in [
+        "/opt/homebrew/bin/ffmpeg",  # Mac Apple Silicon
+        "/usr/local/bin/ffmpeg",     # Mac Intel / Linux
+        "/usr/bin/ffmpeg",           # Linux
+        "/snap/bin/ffmpeg",          # Linux snap
+    ]:
+        if os.path.isfile(ruta):
+            return ruta
+    return ""
+
+
 def extraer_audio_local(video_path: str, output_dir: str, on_progreso=None) -> str:
     """
     Extrae el audio de un archivo de video local y lo convierte a WAV 16kHz mono
-    usando ffmpeg. No sube el archivo — trabaja con la ruta local directamente.
+    usando ffmpeg.
     """
-    import shutil
-    if not shutil.which("ffmpeg"):
+    ffmpeg_bin = _encontrar_ffmpeg()
+    if not ffmpeg_bin:
         raise RuntimeError("ffmpeg no está instalado. Instálalo con: brew install ffmpeg")
 
     if not os.path.exists(video_path):
@@ -486,11 +503,11 @@ def extraer_audio_local(video_path: str, output_dir: str, on_progreso=None) -> s
         on_progreso(0.05, "Extrayendo audio del video...")
 
     cmd = [
-        "ffmpeg", "-y",
+        ffmpeg_bin, "-y",
         "-i", video_path,
-        "-vn",                  # sin video
-        "-ar", "16000",         # 16kHz para Whisper
-        "-ac", "1",             # mono
+        "-vn",
+        "-ar", "16000",
+        "-ac", "1",
         "-f", "wav",
         output_path,
     ]
