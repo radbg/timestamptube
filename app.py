@@ -309,12 +309,14 @@ def descargar_audio_youtube(url: str, output_dir: str, on_progreso=None) -> str:
 
     cmd = [
         "yt-dlp",
+        "--format", "bestaudio/best",
         "--extract-audio",
         "--audio-format", "wav",
         "--audio-quality", "0",
         "--postprocessor-args", "ffmpeg:-ar 16000 -ac 1",
-        "--extractor-args", "youtube:player_client=ios,web",
+        "--extractor-args", "youtube:player_client=android_music,android,tv_embedded",
         "--no-playlist",
+        "--no-check-certificates",
         "-o", output_path,
         url,
     ]
