@@ -285,21 +285,60 @@ def transcribir_audio(
 # FUNCIONES DE YOUTUBE
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _obtener_cookies_youtube() -> str:
+    """Obtiene el contenido del archivo de cookies de YouTube desde secrets o .env."""
+    try:
+        cookies = st.secrets.get("YOUTUBE_COOKIES", "")
+        if cookies:
+            return cookies
+    except Exception:
+        pass
+    return os.environ.get("YOUTUBE_COOKIES", "")
+
+
+def _cmd_base_ytdlp() -> tuple[list, Optional[str]]:
+    """
+    Construye el comando base de yt-dlp con cookies si están disponibles.
+    Retorna (cmd_base, ruta_archivo_cookies_temporal).
+    El caller debe borrar el archivo temporal cuando termine.
+    """
+    cmd = ["yt-dlp"]
+    cookies_file_path = None
+
+    cookies_content = _obtener_cookies_youtube()
+    if cookies_content:
+        # Escribir cookies a archivo temporal
+        import tempfile
+        tf = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".txt", delete=False, encoding="utf-8"
+        )
+        tf.write(cookies_content)
+        tf.close()
+        cookies_file_path = tf.name
+        cmd.extend(["--cookies", cookies_file_path])
+
+    return cmd, cookies_file_path
+
+
 def obtener_info_youtube(url: str) -> dict:
     """Obtiene título, duración y canal sin descargar el video."""
-    cmd = ["yt-dlp", "--dump-json", "--no-download", "--no-playlist", url]
-    resultado = subprocess.run(cmd, capture_output=True, text=True)
-    if resultado.returncode != 0:
-        return {"title": "Video de YouTube", "duration": 0, "channel": ""}
+    cmd, cookies_file = _cmd_base_ytdlp()
+    cmd += ["--dump-json", "--no-download", "--no-playlist", url]
     try:
+        resultado = subprocess.run(cmd, capture_output=True, text=True)
+        if resultado.returncode != 0:
+            return {"title": "Video de YouTube", "duration": 0, "channel": ""}
         info = json.loads(resultado.stdout)
         return {
             "title": info.get("title", "Video de YouTube"),
             "duration": info.get("duration", 0),
             "channel": info.get("channel", ""),
         }
-    except json.JSONDecodeError:
+    except Exception:
         return {"title": "Video de YouTube", "duration": 0, "channel": ""}
+    finally:
+        if cookies_file and os.path.exists(cookies_file):
+            os.unlink(cookies_file)
 
 
 def descargar_audio_youtube(url: str, output_dir: str, on_progreso=None) -> str:
@@ -307,8 +346,8 @@ def descargar_audio_youtube(url: str, output_dir: str, on_progreso=None) -> str:
     os.makedirs(output_dir, exist_ok=True)
     output_path = os.path.join(output_dir, "audio.%(ext)s")
 
-    cmd = [
-        "yt-dlp",
+    cmd, cookies_file = _cmd_base_ytdlp()
+    cmd += [
         "--format", "bestaudio/best",
         "--extract-audio",
         "--audio-format", "wav",
@@ -322,24 +361,27 @@ def descargar_audio_youtube(url: str, output_dir: str, on_progreso=None) -> str:
     if on_progreso:
         on_progreso(0.05, "Descargando audio de YouTube...")
 
-    resultado = subprocess.run(cmd, capture_output=True, text=True)
-    if resultado.returncode != 0:
-        raise RuntimeError(
-            f"No se pudo descargar el audio.\n"
-            f"Verifica que el enlace sea válido y que yt-dlp esté actualizado.\n"
-            f"Error: {resultado.stderr[-500:]}"
-        )
+    try:
+        resultado = subprocess.run(cmd, capture_output=True, text=True)
+        if resultado.returncode != 0:
+            raise RuntimeError(
+                f"No se pudo descargar el audio.\n"
+                f"Error: {resultado.stderr[-600:]}"
+            )
 
-    # Buscar el archivo descargado (yt-dlp puede variar el ext)
-    for ext in ["wav", "m4a", "mp3", "webm", "opus"]:
-        candidate = os.path.join(output_dir, f"audio.{ext}")
-        if os.path.exists(candidate):
-            size_mb = os.path.getsize(candidate) / (1024 * 1024)
-            if on_progreso:
-                on_progreso(0.15, f"Audio descargado ({size_mb:.0f} MB)")
-            return candidate
+        # Buscar el archivo descargado (yt-dlp puede variar el ext)
+        for ext in ["wav", "m4a", "mp3", "webm", "opus"]:
+            candidate = os.path.join(output_dir, f"audio.{ext}")
+            if os.path.exists(candidate):
+                size_mb = os.path.getsize(candidate) / (1024 * 1024)
+                if on_progreso:
+                    on_progreso(0.15, f"Audio descargado ({size_mb:.0f} MB)")
+                return candidate
 
-    raise RuntimeError("No se encontró el archivo de audio descargado.")
+        raise RuntimeError("No se encontró el archivo de audio descargado.")
+    finally:
+        if cookies_file and os.path.exists(cookies_file):
+            os.unlink(cookies_file)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -583,6 +625,40 @@ def main():
 
 def _fase_inicio():
     import shutil
+
+    # Aviso si no hay cookies configuradas (necesarias en Streamlit Cloud)
+    if not _obtener_cookies_youtube():
+        st.warning(
+            "⚠️ **Cookies de YouTube no configuradas.** "
+            "YouTube bloquea descargas desde servidores cloud sin autenticación. "
+            "Para que funcione, agrega tus cookies en **Settings → Secrets** de Streamlit Cloud. "
+            "Ver instrucciones más abajo 👇",
+            icon=None,
+        )
+        with st.expander("📋 Cómo obtener y agregar tus cookies de YouTube"):
+            st.markdown("""
+**Paso 1 — Instala la extensión en Chrome/Firefox:**
+- Chrome: [Get cookies.txt LOCALLY](https://chrome.google.com/webstore/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc)
+- Firefox: [cookies.txt](https://addons.mozilla.org/es/firefox/addon/cookies-txt/)
+
+**Paso 2 — Exporta las cookies:**
+1. Entra a [youtube.com](https://youtube.com) con tu cuenta
+2. Haz clic en la extensión
+3. Selecciona **"Export"** o **"Copy"** → el formato debe ser Netscape/cookies.txt
+
+**Paso 3 — Agrégalas en Streamlit Cloud:**
+1. Ve a tu app en [share.streamlit.io](https://share.streamlit.io)
+2. Clic en **⋮ → Settings → Secrets**
+3. Agrega esto (pegando el contenido completo del archivo):
+```toml
+YOUTUBE_COOKIES = \"\"\"
+# Netscape HTTP Cookie File
+.youtube.com   TRUE   /   FALSE   ...
+...contenido del archivo cookies.txt...
+\"\"\"
+```
+4. Clic en **Save**
+            """)
 
     with st.container():
         url = st.text_input(
