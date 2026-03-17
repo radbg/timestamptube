@@ -349,7 +349,8 @@ def obtener_transcripcion_youtube_api(url: str, idioma_code: str) -> Optional[li
     idiomas_unicos = [i for i in idiomas_a_probar if not (i in vistos or vistos.add(i))]
 
     try:
-        lista = YouTubeTranscriptApi.list_transcripts(video_id)
+        api = YouTubeTranscriptApi()
+        lista = api.list(video_id)
 
         transcript = None
         # 1. Buscar manual en idioma preferido
@@ -383,15 +384,9 @@ def obtener_transcripcion_youtube_api(url: str, idioma_code: str) -> Optional[li
         # Convertir al formato interno {start, end, text}
         segmentos = []
         for entrada in entradas:
-            # Compatibilidad con youtube-transcript-api v0.6+ (objetos) y versiones anteriores (dicts)
-            if isinstance(entrada, dict):
-                texto = entrada.get("text", "").strip().replace("\n", " ")
-                inicio = float(entrada.get("start", 0))
-                duracion = float(entrada.get("duration", 3))
-            else:
-                texto = str(getattr(entrada, "text", "")).strip().replace("\n", " ")
-                inicio = float(getattr(entrada, "start", 0))
-                duracion = float(getattr(entrada, "duration", 3))
+            texto = str(getattr(entrada, "text", "")).strip().replace("\n", " ")
+            inicio = float(getattr(entrada, "start", 0))
+            duracion = float(getattr(entrada, "duration", 3))
             if not texto:
                 continue
             segmentos.append({
