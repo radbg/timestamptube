@@ -886,15 +886,16 @@ YOUTUBE_COOKIES = \"\"\"
 
     with tab_local:
         st.info(
-            "Transcribe un video guardado en tu computadora **sin subirlo** — "
-            "solo se usa la ruta local. Ideal para videos editados o sin subtítulos en YouTube.",
+            "Selecciona un video de tu computadora para transcribirlo con Whisper. "
+            "Ideal para videos editados o sin subtítulos en YouTube.",
             icon="💡",
         )
-        archivo_local = st.text_input(
-            "Ruta del archivo de video",
-            placeholder="/Users/tu-usuario/Desktop/podcast.mp4",
-            key="archivo_local_input",
-            help="Ruta completa al archivo de video (mp4, mov, mkv, avi, m4v, webm...)",
+        archivo_subido = st.file_uploader(
+            "Selecciona el archivo de video",
+            type=["mp4", "mov", "mkv", "avi", "m4v", "webm", "mp3", "m4a", "wav", "ogg"],
+            key="archivo_subido",
+            help="Formatos soportados: mp4, mov, mkv, avi, m4v, webm, mp3, m4a, wav",
+            label_visibility="collapsed",
         )
         titulo_manual_local = st.text_input(
             "Título del video (opcional)",
@@ -920,7 +921,8 @@ YOUTUBE_COOKIES = \"\"\"
         )
 
     # Determinar modo activo
-    usando_archivo_local = bool(st.session_state.get("archivo_local_input", "").strip())
+    archivo_subido = st.session_state.get("archivo_subido")
+    usando_archivo_local = archivo_subido is not None
     url = st.session_state.get("url_input", "").strip()
 
     if not url and not usando_archivo_local:
@@ -936,8 +938,8 @@ YOUTUBE_COOKIES = \"\"\"
         st.error("**yt-dlp** no está instalado. Ejecuta en terminal: `pip install yt-dlp`")
         return
 
-    # Clave de caché: url o ruta de archivo
-    cache_key = st.session_state.get("archivo_local_input", "").strip() if usando_archivo_local else url
+    # Clave de caché: url o nombre del archivo subido
+    cache_key = f"local::{archivo_subido.name}" if usando_archivo_local else url
 
     # ── Verificar caché ───────────────────────────────────────────────────────
     cache = cargar_cache(cache_key)
@@ -1033,13 +1035,12 @@ YOUTUBE_COOKIES = \"\"\"
     status = st.empty()
 
     try:
-        archivo_path = st.session_state.get("archivo_local_input", "").strip()
-        usando_local = bool(archivo_path)
+        archivo_obj = st.session_state.get("archivo_subido")
+        usando_local = archivo_obj is not None
 
         # Paso 1: Info del video / archivo
         if usando_local:
-            nombre_archivo = os.path.basename(archivo_path)
-            titulo = st.session_state.get("titulo_local_input", "").strip() or nombre_archivo
+            titulo = st.session_state.get("titulo_local_input", "").strip() or archivo_obj.name
             status.info(f"💾 **{titulo}**")
             progreso.progress(5, text="Verificando archivo...")
         else:
@@ -1066,13 +1067,19 @@ YOUTUBE_COOKIES = \"\"\"
             status.info(f"📋 Usando transcripción manual ({len(segmentos)} segmentos)")
 
         elif usando_local:
-            # Opción B: archivo de video local → ffmpeg + Whisper
-            progreso.progress(8, text="🎞️ Extrayendo audio del archivo...")
+            # Opción B: archivo subido → guardar en disco → ffmpeg + Whisper
+            progreso.progress(8, text="🎞️ Procesando archivo...")
             with tempfile.TemporaryDirectory() as tmpdir:
+                # Guardar el archivo subido en disco temporal
+                ext = os.path.splitext(archivo_obj.name)[-1] or ".mp4"
+                video_tmp = os.path.join(tmpdir, f"video_input{ext}")
+                with open(video_tmp, "wb") as f:
+                    f.write(archivo_obj.read())
+
                 def _prog_ffmpeg(pct, msg):
                     progreso.progress(int(8 + pct * 10), text=f"🎞️ {msg}")
 
-                audio_path = extraer_audio_local(archivo_path, tmpdir, on_progreso=_prog_ffmpeg)
+                audio_path = extraer_audio_local(video_tmp, tmpdir, on_progreso=_prog_ffmpeg)
                 progreso.progress(18, text="Audio extraído. Iniciando transcripción con Whisper...")
 
                 def _prog_whisper_local(pct, msg):
