@@ -1123,7 +1123,31 @@ YOUTUBE_COOKIES = \"\"\"
                 progreso.progress(70, text=f"✅ Subtítulos obtenidos ({len(segmentos)} segmentos). Analizando temas...")
                 status.info(f"✅ Transcripción obtenida directamente de YouTube ({len(segmentos)} segmentos)")
             else:
-                # Opción D: descargar audio de YouTube y transcribir con Whisper
+                # Verificar si Whisper está disponible antes de intentar descargar
+                _whisper_disponible = False
+                try:
+                    import whisper as _w
+                    _whisper_disponible = True
+                except ImportError:
+                    pass
+
+                if not _whisper_disponible:
+                    # En Streamlit Cloud: Whisper no está instalado, no tiene sentido descargar
+                    progreso.empty()
+                    status.empty()
+                    st.error(
+                        "**Este video no tiene subtítulos automáticos en YouTube** y "
+                        "Whisper no está disponible en este servidor.\n\n"
+                        "**Opciones disponibles:**\n"
+                        "1. 📋 **Pega la transcripción manualmente** usando el panel de arriba\n"
+                        "2. 💾 **Sube el archivo de video** desde la pestaña 'Archivo local' "
+                        "(solo funciona ejecutando la app en tu computadora)\n"
+                        "3. 🖥️ **Ejecuta la app localmente** en tu Mac con: "
+                        "`python3 -m streamlit run app.py`"
+                    )
+                    return
+
+                # Opción D: descargar audio de YouTube y transcribir con Whisper (solo local)
                 status.warning("⚠️ Sin subtítulos en YouTube. Descargando audio para transcribir con Whisper...")
                 progreso.progress(8, text="📥 Descargando audio de YouTube...")
 
