@@ -353,6 +353,7 @@ def descargar_audio_youtube(url: str, output_dir: str, on_progreso=None) -> str:
         "--audio-format", "wav",
         "--audio-quality", "0",
         "--postprocessor-args", "ffmpeg:-ar 16000 -ac 1",
+        "--extractor-args", "youtube:player_client=mweb,web",
         "--no-playlist",
         "-o", output_path,
         url,
