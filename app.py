@@ -488,6 +488,48 @@ def borrar_cache(url: str) -> None:
 # UI — STREAMLIT
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _verificar_password() -> bool:
+    """Muestra pantalla de login y devuelve True si la contraseña es correcta."""
+    if st.session_state.get("autenticado"):
+        return True
+
+    # Obtener contraseña configurada
+    try:
+        password_correcta = st.secrets["APP_PASSWORD"]
+    except Exception:
+        password_correcta = os.environ.get("APP_PASSWORD", "")
+
+    if not password_correcta:
+        # Si no hay contraseña configurada, dejar pasar (modo dev local)
+        return True
+
+    # Pantalla de login
+    st.markdown("""
+    <div style="max-width: 380px; margin: 6rem auto 0; text-align: center;">
+        <div style="font-size: 3rem; margin-bottom: 0.5rem;">⏱️</div>
+        <h2 style="margin-bottom: 0.2rem;">TimestampTube</h2>
+        <p style="color: #888; margin-bottom: 2rem;">Ingresa la contraseña para continuar</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    _, col, _ = st.columns([1, 2, 1])
+    with col:
+        password_ingresada = st.text_input(
+            "Contraseña",
+            type="password",
+            placeholder="••••••••",
+            label_visibility="collapsed",
+        )
+        if st.button("Entrar", type="primary", use_container_width=True):
+            if password_ingresada == password_correcta:
+                st.session_state["autenticado"] = True
+                st.rerun()
+            else:
+                st.error("Contraseña incorrecta.")
+
+    return False
+
+
 def main():
     st.set_page_config(
         page_title="TimestampTube",
@@ -497,6 +539,10 @@ def main():
     )
 
     _inyectar_css()
+
+    # ── Login ─────────────────────────────────────────────────────────────────
+    if not _verificar_password():
+        st.stop()
 
     # ── Header ────────────────────────────────────────────────────────────────
     st.markdown("""
