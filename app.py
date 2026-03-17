@@ -296,6 +296,88 @@ def _obtener_cookies_youtube() -> str:
     return os.environ.get("YOUTUBE_COOKIES", "")
 
 
+def extraer_video_id(url: str) -> Optional[str]:
+    """Extrae el video ID de una URL de YouTube."""
+    patron = r'(?:v=|/v/|youtu\.be/|/embed/|/shorts/)([A-Za-z0-9_-]{11})'
+    m = re.search(patron, url)
+    return m.group(1) if m else None
+
+
+def obtener_transcripcion_youtube_api(url: str, idioma_code: str) -> Optional[list]:
+    """
+    Obtiene la transcripción directamente de YouTube sin descargar audio.
+    Funciona con subtítulos automáticos y manuales.
+    Retorna lista de segmentos [{"start", "end", "text"}] o None si no hay transcripción.
+    """
+    try:
+        from youtube_transcript_api import YouTubeTranscriptApi, NoTranscriptFound, TranscriptsDisabled
+    except ImportError:
+        return None
+
+    video_id = extraer_video_id(url)
+    if not video_id:
+        return None
+
+    # Orden de preferencia de idiomas a intentar
+    idiomas_a_probar = [idioma_code, "es", "en", "pt", "fr"]
+    # Eliminar duplicados manteniendo orden
+    vistos = set()
+    idiomas_unicos = [i for i in idiomas_a_probar if not (i in vistos or vistos.add(i))]
+
+    try:
+        lista = YouTubeTranscriptApi.list_transcripts(video_id)
+
+        transcript = None
+        # 1. Buscar manual en idioma preferido
+        for lang in idiomas_unicos:
+            try:
+                transcript = lista.find_manually_created_transcript([lang])
+                break
+            except Exception:
+                pass
+
+        # 2. Si no hay manual, buscar automático
+        if not transcript:
+            for lang in idiomas_unicos:
+                try:
+                    transcript = lista.find_generated_transcript([lang])
+                    break
+                except Exception:
+                    pass
+
+        # 3. Si no hay en ningún idioma preferido, tomar el primero disponible
+        if not transcript:
+            for t in lista:
+                transcript = t
+                break
+
+        if not transcript:
+            return None
+
+        entradas = transcript.fetch()
+
+        # Convertir al formato interno {start, end, text}
+        segmentos = []
+        for entrada in entradas:
+            texto = entrada.get("text", "").strip().replace("\n", " ")
+            if not texto:
+                continue
+            inicio = float(entrada.get("start", 0))
+            duracion = float(entrada.get("duration", 3))
+            segmentos.append({
+                "start": round(inicio, 3),
+                "end": round(inicio + duracion, 3),
+                "text": texto,
+            })
+
+        return segmentos if segmentos else None
+
+    except (NoTranscriptFound, TranscriptsDisabled):
+        return None
+    except Exception:
+        return None
+
+
 def _cmd_base_ytdlp() -> tuple[list, Optional[str]]:
     """
     Construye el comando base de yt-dlp con cookies si están disponibles.
@@ -773,27 +855,36 @@ YOUTUBE_COOKIES = \"\"\"
             info_str += f" · {duracion/60:.0f} min"
         status.info(info_str)
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            # Paso 2: Descargar audio
-            progreso.progress(5, text="📥 Descargando audio de YouTube...")
-            audio_path = descargar_audio_youtube(url, tmpdir)
-            progreso.progress(15, text="Audio descargado. Iniciando transcripción...")
+        # Paso 2: Intentar obtener transcripción directamente de YouTube (sin descargar audio)
+        progreso.progress(5, text="📡 Buscando subtítulos en YouTube...")
+        segmentos = obtener_transcripcion_youtube_api(url, idioma_code)
 
-            # Paso 3: Transcribir con Whisper
-            def _prog_whisper(pct, msg):
-                p = int(15 + pct * 55)  # Mapear 0-1 a 15-70
-                progreso.progress(min(p, 70), text=f"🎙️ {msg}")
+        if segmentos:
+            progreso.progress(70, text=f"✅ Subtítulos obtenidos ({len(segmentos)} segmentos). Analizando temas...")
+            status.info(f"✅ Transcripción obtenida directamente de YouTube ({len(segmentos)} segmentos)")
+        else:
+            # Fallback: descargar audio y transcribir con Whisper
+            status.warning("⚠️ No hay subtítulos disponibles en YouTube. Descargando audio para transcribir con Whisper...")
+            progreso.progress(8, text="📥 Descargando audio de YouTube...")
 
-            segmentos = transcribir_audio(
-                audio_path,
-                modelo=whisper_modelo,
-                idioma=idioma_code,
-                on_progreso=_prog_whisper,
-            )
+            with tempfile.TemporaryDirectory() as tmpdir:
+                audio_path = descargar_audio_youtube(url, tmpdir)
+                progreso.progress(15, text="Audio descargado. Iniciando transcripción...")
 
-        if not segmentos:
-            st.error("La transcripción está vacía. El video puede no tener audio audible.")
-            return
+                def _prog_whisper(pct, msg):
+                    p = int(15 + pct * 55)
+                    progreso.progress(min(p, 70), text=f"🎙️ {msg}")
+
+                segmentos = transcribir_audio(
+                    audio_path,
+                    modelo=whisper_modelo,
+                    idioma=idioma_code,
+                    on_progreso=_prog_whisper,
+                )
+
+            if not segmentos:
+                st.error("La transcripción está vacía. El video puede no tener audio audible.")
+                return
 
         # Guardar caché
         guardar_cache(url, titulo, segmentos, whisper_modelo)
