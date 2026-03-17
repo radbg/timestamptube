@@ -467,6 +467,48 @@ def descargar_audio_youtube(url: str, output_dir: str, on_progreso=None) -> str:
             os.unlink(cookies_file)
 
 
+def extraer_audio_local(video_path: str, output_dir: str, on_progreso=None) -> str:
+    """
+    Extrae el audio de un archivo de video local y lo convierte a WAV 16kHz mono
+    usando ffmpeg. No sube el archivo — trabaja con la ruta local directamente.
+    """
+    import shutil
+    if not shutil.which("ffmpeg"):
+        raise RuntimeError("ffmpeg no está instalado. Instálalo con: brew install ffmpeg")
+
+    if not os.path.exists(video_path):
+        raise RuntimeError(f"No se encontró el archivo: {video_path}")
+
+    os.makedirs(output_dir, exist_ok=True)
+    output_path = os.path.join(output_dir, "audio_local.wav")
+
+    if on_progreso:
+        on_progreso(0.05, "Extrayendo audio del video...")
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", video_path,
+        "-vn",                  # sin video
+        "-ar", "16000",         # 16kHz para Whisper
+        "-ac", "1",             # mono
+        "-f", "wav",
+        output_path,
+    ]
+
+    resultado = subprocess.run(cmd, capture_output=True, text=True)
+    if resultado.returncode != 0:
+        raise RuntimeError(
+            f"ffmpeg no pudo extraer el audio.\n"
+            f"Error: {resultado.stderr[-400:]}"
+        )
+
+    size_mb = os.path.getsize(output_path) / (1024 * 1024)
+    if on_progreso:
+        on_progreso(0.20, f"Audio extraído ({size_mb:.0f} MB)")
+
+    return output_path
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # FUNCIONES DE CLAUDE
 # ══════════════════════════════════════════════════════════════════════════════
@@ -544,6 +586,94 @@ def generar_timestamps_con_claude(segmentos: list, status_placeholder=None) -> d
         raise RuntimeError(
             f"Claude no devolvió JSON válido.\nRespuesta: {texto_respuesta[:500]}"
         )
+
+
+def _texto_a_segmentos(texto: str) -> list:
+    """
+    Convierte texto de transcripción pegado manualmente a segmentos internos.
+    Soporta múltiples formatos:
+      - [HH:MM:SS] texto  /  [MM:SS] texto
+      - HH:MM:SS texto    /  MM:SS texto  (YouTube Studio)
+      - SRT: línea "HH:MM:SS,mmm --> ..." seguida de texto
+      - Texto plano sin timestamps (asigna tiempos estimados por palabras)
+    """
+    lineas = [l.strip() for l in texto.strip().splitlines()]
+    segmentos = []
+
+    # Patrones de timestamp
+    pat_bracket = re.compile(r'^\[(\d{1,2}):(\d{2})(?::(\d{2}))?\]\s*(.*)')
+    pat_inline  = re.compile(r'^(\d{1,2}):(\d{2})(?::(\d{2}))?\s+(.*)')
+    pat_srt_arrow = re.compile(r'(\d{2}):(\d{2}):(\d{2})[,.](\d+)\s*-->')
+
+    def _ts(hh, mm, ss):
+        return int(hh) * 3600 + int(mm) * 60 + int(ss or 0)
+
+    i = 0
+    while i < len(lineas):
+        linea = lineas[i]
+
+        # Formato [HH:MM:SS] o [MM:SS]
+        m = pat_bracket.match(linea)
+        if m:
+            g = m.groups()
+            if g[2] is not None:
+                inicio = _ts(g[0], g[1], g[2])
+                texto_seg = g[3]
+            else:
+                inicio = _ts(0, g[0], g[1])
+                texto_seg = g[3]
+            if texto_seg:
+                segmentos.append({"start": float(inicio), "end": float(inicio + 5), "text": texto_seg})
+            i += 1
+            continue
+
+        # Formato SRT con flecha "-->"
+        m = pat_srt_arrow.match(linea)
+        if m:
+            inicio = _ts(m.group(1), m.group(2), m.group(3))
+            i += 1
+            partes = []
+            while i < len(lineas) and lineas[i] and not lineas[i].isdigit():
+                partes.append(lineas[i])
+                i += 1
+            texto_seg = " ".join(partes).strip()
+            if texto_seg:
+                segmentos.append({"start": float(inicio), "end": float(inicio + 5), "text": texto_seg})
+            continue
+
+        # Formato MM:SS texto o HH:MM:SS texto
+        m = pat_inline.match(linea)
+        if m:
+            g = m.groups()
+            if g[2] is not None:
+                inicio = _ts(g[0], g[1], g[2])
+                texto_seg = g[3]
+            else:
+                inicio = _ts(0, g[0], g[1])
+                texto_seg = g[3]
+            if texto_seg:
+                segmentos.append({"start": float(inicio), "end": float(inicio + 5), "text": texto_seg})
+            i += 1
+            continue
+
+        i += 1
+
+    # Si no se encontraron timestamps, dividir texto plano en bloques y estimar tiempos
+    if not segmentos:
+        palabras = texto.split()
+        PALABRAS_POR_SEG = 2.5  # velocidad media de habla
+        PALABRAS_POR_BLOQUE = 50
+        for idx in range(0, len(palabras), PALABRAS_POR_BLOQUE):
+            bloque = " ".join(palabras[idx:idx + PALABRAS_POR_BLOQUE])
+            inicio = (idx / PALABRAS_POR_SEG)
+            fin = ((idx + PALABRAS_POR_BLOQUE) / PALABRAS_POR_SEG)
+            segmentos.append({"start": round(inicio, 1), "end": round(fin, 1), "text": bloque})
+
+    # Ajustar end de cada segmento con el start del siguiente
+    for k in range(len(segmentos) - 1):
+        segmentos[k]["end"] = segmentos[k + 1]["start"]
+
+    return segmentos
 
 
 def formatear_timestamps(temas: list) -> str:
@@ -743,7 +873,10 @@ YOUTUBE_COOKIES = \"\"\"
 4. Clic en **Save**
             """)
 
-    with st.container():
+    tab_yt, tab_local = st.tabs(["🔗 YouTube", "💾 Archivo local"])
+
+    # ── Controles comunes (calidad + idioma) ──────────────────────────────────
+    with tab_yt:
         url = st.text_input(
             "Enlace de YouTube",
             placeholder="https://www.youtube.com/watch?v=...",
@@ -751,40 +884,63 @@ YOUTUBE_COOKIES = \"\"\"
             help="Pega el enlace completo del podcast, live o video largo",
         )
 
-        col1, col2 = st.columns(2)
-        with col1:
-            calidad = st.radio(
-                "Calidad de transcripción",
-                options=list(MAPA_CALIDAD.keys()),
-                index=1,
-                key="calidad",
-                help="Rápida: small (veloz) · Balanceada: medium · Alta: large (lento pero preciso)",
-            )
-        with col2:
-            idioma = st.selectbox(
-                "Idioma del audio",
-                options=list(MAPA_IDIOMAS.keys()),
-                index=0,
-                key="idioma",
-            )
+    with tab_local:
+        st.info(
+            "Transcribe un video guardado en tu computadora **sin subirlo** — "
+            "solo se usa la ruta local. Ideal para videos editados o sin subtítulos en YouTube.",
+            icon="💡",
+        )
+        archivo_local = st.text_input(
+            "Ruta del archivo de video",
+            placeholder="/Users/tu-usuario/Desktop/podcast.mp4",
+            key="archivo_local_input",
+            help="Ruta completa al archivo de video (mp4, mov, mkv, avi, m4v, webm...)",
+        )
+        titulo_manual_local = st.text_input(
+            "Título del video (opcional)",
+            placeholder="Mi podcast - Episodio 42",
+            key="titulo_local_input",
+        )
 
-    if not url:
+    col1, col2 = st.columns(2)
+    with col1:
+        calidad = st.radio(
+            "Calidad de transcripción",
+            options=list(MAPA_CALIDAD.keys()),
+            index=1,
+            key="calidad",
+            help="Rápida: small (veloz) · Balanceada: medium · Alta: large (lento pero preciso)",
+        )
+    with col2:
+        idioma = st.selectbox(
+            "Idioma del audio",
+            options=list(MAPA_IDIOMAS.keys()),
+            index=0,
+            key="idioma",
+        )
+
+    # Determinar modo activo
+    usando_archivo_local = bool(st.session_state.get("archivo_local_input", "").strip())
+    url = st.session_state.get("url_input", "").strip()
+
+    if not url and not usando_archivo_local:
         st.markdown("---")
         _mostrar_instrucciones()
         return
 
-    # Validar dominio de YouTube
-    if not re.match(r'^https?://(www\.)?(youtube\.com|youtu\.be)/', url):
+    if url and not re.match(r'^https?://(www\.)?(youtube\.com|youtu\.be)/', url):
         st.warning("El enlace no parece ser de YouTube. Verifica que sea correcto.")
         return
 
-    # Verificar yt-dlp instalado
-    if not shutil.which("yt-dlp"):
+    if not usando_archivo_local and not shutil.which("yt-dlp"):
         st.error("**yt-dlp** no está instalado. Ejecuta en terminal: `pip install yt-dlp`")
         return
 
+    # Clave de caché: url o ruta de archivo
+    cache_key = st.session_state.get("archivo_local_input", "").strip() if usando_archivo_local else url
+
     # ── Verificar caché ───────────────────────────────────────────────────────
-    cache = cargar_cache(url)
+    cache = cargar_cache(cache_key)
     if cache:
         dur_min = cache.get("duracion_video", 0) / 60
         n_segs = cache.get("total_segmentos", 0)
@@ -807,7 +963,7 @@ YOUTUBE_COOKIES = \"\"\"
             if st.button("⚡ Usar transcripción guardada", type="primary", use_container_width=True):
                 st.session_state.update({
                     "segmentos": cache["segmentos"],
-                    "url": url,
+                    "url": cache_key,
                     "titulo_video": cache.get("titulo", ""),
                     "whisper_modelo": cache.get("modelo_whisper", "medium"),
                     "fase": "transcrito",
@@ -815,9 +971,45 @@ YOUTUBE_COOKIES = \"\"\"
                 st.rerun()
         with c2:
             if st.button("🔄 Transcribir de nuevo", use_container_width=True):
-                borrar_cache(url)
+                borrar_cache(cache_key)
                 st.rerun()
         return
+
+    # ── Opción manual: pegar transcripción ────────────────────────────────────
+    st.markdown("<br>", unsafe_allow_html=True)
+    with st.expander("📋 ¿El video no tiene subtítulos? Pega la transcripción manualmente"):
+        st.markdown(
+            "Pega aquí la transcripción del video. Acepta texto con timestamps "
+            "(`[00:00] texto`, `00:00 texto`, formato SRT) o texto plano sin timestamps."
+        )
+        transcripcion_manual = st.text_area(
+            "Transcripción",
+            value=st.session_state.get("transcripcion_manual_texto", ""),
+            height=200,
+            placeholder="Pega aquí el texto de la transcripción...\n\n"
+                        "Formatos soportados:\n"
+                        "  [00:00] Introducción del podcast\n"
+                        "  [00:05:30] Primer tema...\n"
+                        "  00:00 Texto sin corchetes\n"
+                        "  O simplemente texto plano",
+            key="transcripcion_manual_area",
+            label_visibility="collapsed",
+        )
+        c_m1, c_m2 = st.columns(2)
+        with c_m1:
+            if st.button("✅ Usar esta transcripción", type="primary", use_container_width=True):
+                if transcripcion_manual.strip():
+                    st.session_state["transcripcion_manual_texto"] = transcripcion_manual
+                    st.success(f"Transcripción guardada ({len(transcripcion_manual.split())} palabras). Pulsa **GENERAR TIMESTAMPS**.")
+                else:
+                    st.warning("El campo está vacío.")
+        with c_m2:
+            if st.button("🗑️ Borrar transcripción manual", use_container_width=True):
+                st.session_state.pop("transcripcion_manual_texto", None)
+                st.rerun()
+
+        if st.session_state.get("transcripcion_manual_texto"):
+            st.info(f"✅ Transcripción manual lista ({len(st.session_state['transcripcion_manual_texto'].split())} palabras)")
 
     # ── Botón iniciar ─────────────────────────────────────────────────────────
     st.markdown("<br>", unsafe_allow_html=True)
@@ -841,53 +1033,103 @@ YOUTUBE_COOKIES = \"\"\"
     status = st.empty()
 
     try:
-        # Paso 1: Info del video
-        progreso.progress(2, text="Obteniendo información del video...")
-        info = obtener_info_youtube(url)
-        titulo = info.get("title", "Video de YouTube")
-        duracion = info.get("duration", 0)
-        canal = info.get("channel", "")
+        archivo_path = st.session_state.get("archivo_local_input", "").strip()
+        usando_local = bool(archivo_path)
 
-        info_str = f"📺 **{titulo}**"
-        if canal:
-            info_str += f" — {canal}"
-        if duracion > 0:
-            info_str += f" · {duracion/60:.0f} min"
-        status.info(info_str)
-
-        # Paso 2: Intentar obtener transcripción directamente de YouTube (sin descargar audio)
-        progreso.progress(5, text="📡 Buscando subtítulos en YouTube...")
-        segmentos = obtener_transcripcion_youtube_api(url, idioma_code)
-
-        if segmentos:
-            progreso.progress(70, text=f"✅ Subtítulos obtenidos ({len(segmentos)} segmentos). Analizando temas...")
-            status.info(f"✅ Transcripción obtenida directamente de YouTube ({len(segmentos)} segmentos)")
+        # Paso 1: Info del video / archivo
+        if usando_local:
+            nombre_archivo = os.path.basename(archivo_path)
+            titulo = st.session_state.get("titulo_local_input", "").strip() or nombre_archivo
+            status.info(f"💾 **{titulo}**")
+            progreso.progress(5, text="Verificando archivo...")
         else:
-            # Fallback: descargar audio y transcribir con Whisper
-            status.warning("⚠️ No hay subtítulos disponibles en YouTube. Descargando audio para transcribir con Whisper...")
-            progreso.progress(8, text="📥 Descargando audio de YouTube...")
+            progreso.progress(2, text="Obteniendo información del video...")
+            info = obtener_info_youtube(url)
+            titulo = info.get("title", "Video de YouTube")
+            duracion = info.get("duration", 0)
+            canal = info.get("channel", "")
+            info_str = f"📺 **{titulo}**"
+            if canal:
+                info_str += f" — {canal}"
+            if duracion > 0:
+                info_str += f" · {duracion/60:.0f} min"
+            status.info(info_str)
 
+        # Paso 2: Obtener transcripción
+        texto_manual = st.session_state.get("transcripcion_manual_texto", "").strip()
+
+        if texto_manual:
+            # Opción A: transcripción pegada manualmente
+            progreso.progress(50, text="📋 Procesando transcripción manual...")
+            segmentos = _texto_a_segmentos(texto_manual)
+            progreso.progress(70, text=f"✅ Transcripción manual procesada ({len(segmentos)} segmentos)")
+            status.info(f"📋 Usando transcripción manual ({len(segmentos)} segmentos)")
+
+        elif usando_local:
+            # Opción B: archivo de video local → ffmpeg + Whisper
+            progreso.progress(8, text="🎞️ Extrayendo audio del archivo...")
             with tempfile.TemporaryDirectory() as tmpdir:
-                audio_path = descargar_audio_youtube(url, tmpdir)
-                progreso.progress(15, text="Audio descargado. Iniciando transcripción...")
+                def _prog_ffmpeg(pct, msg):
+                    progreso.progress(int(8 + pct * 10), text=f"🎞️ {msg}")
 
-                def _prog_whisper(pct, msg):
-                    p = int(15 + pct * 55)
+                audio_path = extraer_audio_local(archivo_path, tmpdir, on_progreso=_prog_ffmpeg)
+                progreso.progress(18, text="Audio extraído. Iniciando transcripción con Whisper...")
+
+                def _prog_whisper_local(pct, msg):
+                    p = int(18 + pct * 52)
                     progreso.progress(min(p, 70), text=f"🎙️ {msg}")
 
                 segmentos = transcribir_audio(
                     audio_path,
                     modelo=whisper_modelo,
                     idioma=idioma_code,
-                    on_progreso=_prog_whisper,
+                    on_progreso=_prog_whisper_local,
                 )
 
             if not segmentos:
-                st.error("La transcripción está vacía. El video puede no tener audio audible.")
+                st.error("La transcripción está vacía. Verifica que el archivo tenga audio audible.")
                 return
 
-        # Guardar caché
-        guardar_cache(url, titulo, segmentos, whisper_modelo)
+        else:
+            # Opción C: subtítulos directos de YouTube
+            progreso.progress(5, text="📡 Buscando subtítulos en YouTube...")
+            segmentos = obtener_transcripcion_youtube_api(url, idioma_code)
+
+            if segmentos:
+                progreso.progress(70, text=f"✅ Subtítulos obtenidos ({len(segmentos)} segmentos). Analizando temas...")
+                status.info(f"✅ Transcripción obtenida directamente de YouTube ({len(segmentos)} segmentos)")
+            else:
+                # Opción D: descargar audio de YouTube y transcribir con Whisper
+                status.warning("⚠️ Sin subtítulos en YouTube. Descargando audio para transcribir con Whisper...")
+                progreso.progress(8, text="📥 Descargando audio de YouTube...")
+
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    audio_path = descargar_audio_youtube(url, tmpdir)
+                    progreso.progress(15, text="Audio descargado. Iniciando transcripción...")
+
+                    def _prog_whisper(pct, msg):
+                        p = int(15 + pct * 55)
+                        progreso.progress(min(p, 70), text=f"🎙️ {msg}")
+
+                    segmentos = transcribir_audio(
+                        audio_path,
+                        modelo=whisper_modelo,
+                        idioma=idioma_code,
+                        on_progreso=_prog_whisper,
+                    )
+
+                if not segmentos:
+                    st.error(
+                        "No se pudo obtener la transcripción.\n\n"
+                        "**Opciones disponibles:**\n"
+                        "1. Pega la transcripción manualmente en el panel de arriba\n"
+                        "2. Usa la pestaña **💾 Archivo local** si tienes el video descargado\n"
+                        "3. Ejecuta la app localmente (sin restricciones de YouTube)"
+                    )
+                    return
+
+        # Guardar caché con cache_key (url o ruta de archivo)
+        guardar_cache(cache_key, titulo, segmentos, whisper_modelo)
         progreso.progress(72, text="Transcripción guardada. Analizando temas con IA...")
 
         # Paso 4: Analizar temas con Claude
@@ -908,7 +1150,7 @@ YOUTUBE_COOKIES = \"\"\"
             "segmentos": segmentos,
             "temas": resultado_temas,
             "timestamps_texto": texto_timestamps,
-            "url": url,
+            "url": cache_key,
             "titulo_video": titulo,
             "whisper_modelo": whisper_modelo,
             "fase": "completado",
