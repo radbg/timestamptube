@@ -96,10 +96,31 @@ IMPORTANTE: Tu respuesta debe contener ÚNICAMENTE un objeto JSON válido. Sin e
 # FUNCIONES DE AUDIO Y TRANSCRIPCIÓN (Whisper local)
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _encontrar_binario(nombre: str) -> str:
+    """Busca un binario (ffmpeg, ffprobe, yt-dlp) en PATH y rutas comunes."""
+    import shutil
+    ruta = shutil.which(nombre)
+    if ruta:
+        return ruta
+    for directorio in [
+        "/opt/homebrew/bin",    # Mac Apple Silicon
+        "/usr/local/bin",       # Mac Intel / Linux
+        "/usr/bin",             # Linux
+        "/snap/bin",            # Linux snap
+    ]:
+        candidato = os.path.join(directorio, nombre)
+        if os.path.isfile(candidato):
+            return candidato
+    return ""
+
+
 def _obtener_duracion_audio(audio_path: str) -> float:
     """Obtiene la duración de un archivo de audio con ffprobe."""
+    ffprobe = _encontrar_binario("ffprobe")
+    if not ffprobe:
+        return 0.0
     cmd = [
-        "ffprobe", "-v", "quiet",
+        ffprobe, "-v", "quiet",
         "-show_entries", "format=duration",
         "-of", "csv=p=0",
         audio_path,
@@ -115,8 +136,11 @@ def _obtener_duracion_audio(audio_path: str) -> float:
 
 def _extraer_chunk(audio_path: str, inicio: float, duracion: float, chunk_path: str) -> bool:
     """Extrae un fragmento de audio con FFmpeg."""
+    ffmpeg_bin = _encontrar_binario("ffmpeg")
+    if not ffmpeg_bin:
+        return False
     cmd = [
-        "ffmpeg", "-y",
+        ffmpeg_bin, "-y",
         "-ss", str(inicio),
         "-t", str(duracion),
         "-i", audio_path,
@@ -359,11 +383,17 @@ def obtener_transcripcion_youtube_api(url: str, idioma_code: str) -> Optional[li
         # Convertir al formato interno {start, end, text}
         segmentos = []
         for entrada in entradas:
-            texto = entrada.get("text", "").strip().replace("\n", " ")
+            # Compatibilidad con youtube-transcript-api v0.6+ (objetos) y versiones anteriores (dicts)
+            if isinstance(entrada, dict):
+                texto = entrada.get("text", "").strip().replace("\n", " ")
+                inicio = float(entrada.get("start", 0))
+                duracion = float(entrada.get("duration", 3))
+            else:
+                texto = str(getattr(entrada, "text", "")).strip().replace("\n", " ")
+                inicio = float(getattr(entrada, "start", 0))
+                duracion = float(getattr(entrada, "duration", 3))
             if not texto:
                 continue
-            inicio = float(entrada.get("start", 0))
-            duracion = float(entrada.get("duration", 3))
             segmentos.append({
                 "start": round(inicio, 3),
                 "end": round(inicio + duracion, 3),
@@ -447,9 +477,19 @@ def descargar_audio_youtube(url: str, output_dir: str, on_progreso=None) -> str:
     try:
         resultado = subprocess.run(cmd, capture_output=True, text=True)
         if resultado.returncode != 0:
+            stderr = resultado.stderr or ""
+            # Detectar errores comunes y dar mensaje amigable
+            if "403" in stderr or "PO Token" in stderr or "n challenge" in stderr:
+                raise RuntimeError(
+                    "YouTube bloqueó la descarga desde este servidor.\n\n"
+                    "**Opciones:**\n"
+                    "1. Usa la transcripción manual (pega el texto arriba)\n"
+                    "2. Ejecuta la app en tu computadora local\n"
+                    "3. Prueba con un video que tenga subtítulos automáticos"
+                )
             raise RuntimeError(
-                f"No se pudo descargar el audio.\n"
-                f"Error: {resultado.stderr[-600:]}"
+                f"No se pudo descargar el audio. Verifica que el enlace sea válido "
+                f"y que yt-dlp esté actualizado.\nDetalle: {stderr[-300:]}"
             )
 
         # Buscar el archivo descargado (yt-dlp puede variar el ext)
@@ -467,29 +507,12 @@ def descargar_audio_youtube(url: str, output_dir: str, on_progreso=None) -> str:
             os.unlink(cookies_file)
 
 
-def _encontrar_ffmpeg() -> str:
-    """Busca ffmpeg en el PATH y en rutas comunes de Mac y Linux."""
-    import shutil
-    ffmpeg = shutil.which("ffmpeg")
-    if ffmpeg:
-        return ffmpeg
-    for ruta in [
-        "/opt/homebrew/bin/ffmpeg",  # Mac Apple Silicon
-        "/usr/local/bin/ffmpeg",     # Mac Intel / Linux
-        "/usr/bin/ffmpeg",           # Linux
-        "/snap/bin/ffmpeg",          # Linux snap
-    ]:
-        if os.path.isfile(ruta):
-            return ruta
-    return ""
-
-
 def extraer_audio_local(video_path: str, output_dir: str, on_progreso=None) -> str:
     """
     Extrae el audio de un archivo de video local y lo convierte a WAV 16kHz mono
     usando ffmpeg.
     """
-    ffmpeg_bin = _encontrar_ffmpeg()
+    ffmpeg_bin = _encontrar_binario("ffmpeg")
     if not ffmpeg_bin:
         raise RuntimeError("ffmpeg no está instalado. Instálalo con: brew install ffmpeg")
 
