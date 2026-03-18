@@ -29,7 +29,7 @@ except ImportError:
 # CONSTANTES
 # ══════════════════════════════════════════════════════════════════════════════
 
-MODELO_CLAUDE = "claude-sonnet-4-5-20250514"
+MODELO_CLAUDE = "claude-sonnet-4-5"
 CHUNK_DURACION = 600   # 10 minutos por chunk
 CHUNK_OVERLAP = 5      # 5 segundos de overlap para no perder bordes
 
@@ -588,7 +588,6 @@ def generar_timestamps_con_claude(segmentos: list, status_placeholder=None) -> d
     with client.messages.stream(
         model=MODELO_CLAUDE,
         max_tokens=4096,
-        thinking={"type": "adaptive"},
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": prompt}],
     ) as stream:
