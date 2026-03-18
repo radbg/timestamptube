@@ -327,24 +327,21 @@ def extraer_video_id(url: str) -> Optional[str]:
     return m.group(1) if m else None
 
 
-def obtener_transcripcion_youtube_api(url: str, idioma_code: str) -> Optional[list]:
+def obtener_transcripcion_youtube_api(url: str, idioma_code: str) -> tuple[Optional[list], Optional[str]]:
     """
     Obtiene la transcripción directamente de YouTube sin descargar audio.
-    Funciona con subtítulos automáticos y manuales.
-    Retorna lista de segmentos [{"start", "end", "text"}] o None si no hay transcripción.
+    Retorna (segmentos, error_msg). Si funciona: (lista, None). Si falla: (None, "razón").
     """
     try:
         from youtube_transcript_api import YouTubeTranscriptApi, NoTranscriptFound, TranscriptsDisabled
     except ImportError:
-        return None
+        return None, "youtube-transcript-api no instalado"
 
     video_id = extraer_video_id(url)
     if not video_id:
-        return None
+        return None, "URL de YouTube inválida"
 
-    # Orden de preferencia de idiomas a intentar
     idiomas_a_probar = [idioma_code, "es", "en", "pt", "fr"]
-    # Eliminar duplicados manteniendo orden
     vistos = set()
     idiomas_unicos = [i for i in idiomas_a_probar if not (i in vistos or vistos.add(i))]
 
@@ -353,7 +350,6 @@ def obtener_transcripcion_youtube_api(url: str, idioma_code: str) -> Optional[li
         lista = api.list(video_id)
 
         transcript = None
-        # 1. Buscar manual en idioma preferido
         for lang in idiomas_unicos:
             try:
                 transcript = lista.find_manually_created_transcript([lang])
@@ -361,7 +357,6 @@ def obtener_transcripcion_youtube_api(url: str, idioma_code: str) -> Optional[li
             except Exception:
                 pass
 
-        # 2. Si no hay manual, buscar automático
         if not transcript:
             for lang in idiomas_unicos:
                 try:
@@ -370,18 +365,16 @@ def obtener_transcripcion_youtube_api(url: str, idioma_code: str) -> Optional[li
                 except Exception:
                     pass
 
-        # 3. Si no hay en ningún idioma preferido, tomar el primero disponible
         if not transcript:
             for t in lista:
                 transcript = t
                 break
 
         if not transcript:
-            return None
+            return None, "No hay subtítulos disponibles en este video"
 
         entradas = transcript.fetch()
 
-        # Convertir al formato interno {start, end, text}
         segmentos = []
         for entrada in entradas:
             texto = str(getattr(entrada, "text", "")).strip().replace("\n", " ")
@@ -395,12 +388,63 @@ def obtener_transcripcion_youtube_api(url: str, idioma_code: str) -> Optional[li
                 "text": texto,
             })
 
-        return segmentos if segmentos else None
+        return (segmentos, None) if segmentos else (None, "Subtítulos vacíos")
 
     except (NoTranscriptFound, TranscriptsDisabled):
-        return None
+        return None, "No hay subtítulos disponibles en este video"
+    except Exception as e:
+        return None, f"Error al obtener subtítulos: {type(e).__name__}: {e}"
+
+
+def obtener_subtitulos_ytdlp(url: str, idioma_code: str) -> Optional[list]:
+    """
+    Fallback: descarga subtítulos con yt-dlp sin descargar el video.
+    Usa endpoints distintos a youtube-transcript-api, útil cuando el API está bloqueada.
+    """
+    cmd_base, cookies_file = _cmd_base_ytdlp()
+
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cmd = cmd_base + [
+                "--write-auto-sub", "--write-sub",
+                "--skip-download",
+                "--sub-langs", f"{idioma_code},es,en",
+                "--sub-format", "json3",
+                "--no-playlist",
+                "--ignore-errors",
+                "-o", os.path.join(tmpdir, "subs"),
+                url,
+            ]
+            resultado = subprocess.run(cmd, capture_output=True, text=True)
+
+            archivos = [f for f in os.listdir(tmpdir) if f.endswith(".json3")]
+            if not archivos:
+                return None
+
+            sub_path = os.path.join(tmpdir, archivos[0])
+            with open(sub_path, encoding="utf-8") as f:
+                data = json.load(f)
+
+            segmentos = []
+            for event in data.get("events", []):
+                segs = event.get("segs", [])
+                texto = "".join(s.get("utf8", "") for s in segs).strip().replace("\n", " ")
+                if not texto:
+                    continue
+                t_start = event.get("tStartMs", 0) / 1000
+                t_dur = event.get("dDurationMs", 3000) / 1000
+                segmentos.append({
+                    "start": round(t_start, 3),
+                    "end": round(t_start + t_dur, 3),
+                    "text": texto,
+                })
+
+            return segmentos if segmentos else None
     except Exception:
         return None
+    finally:
+        if cookies_file and os.path.exists(cookies_file):
+            os.unlink(cookies_file)
 
 
 def _cmd_base_ytdlp() -> tuple[list, Optional[str]]:
@@ -1134,12 +1178,21 @@ YOUTUBE_COOKIES = \"\"\"
         else:
             # Opción C: subtítulos directos de YouTube
             progreso.progress(5, text="📡 Buscando subtítulos en YouTube...")
-            segmentos = obtener_transcripcion_youtube_api(url, idioma_code)
+            segmentos, error_api = obtener_transcripcion_youtube_api(url, idioma_code)
 
             if segmentos:
                 progreso.progress(70, text=f"✅ Subtítulos obtenidos ({len(segmentos)} segmentos). Analizando temas...")
                 status.info(f"✅ Transcripción obtenida directamente de YouTube ({len(segmentos)} segmentos)")
             else:
+                # Intentar fallback con yt-dlp (diferente endpoint, menos bloqueado)
+                if error_api and ("IpBlocked" in error_api or "RequestBlocked" in error_api or "Error" in error_api):
+                    progreso.progress(20, text="📡 Intentando método alternativo...")
+                    segmentos = obtener_subtitulos_ytdlp(url, idioma_code)
+                    if segmentos:
+                        progreso.progress(70, text=f"✅ Subtítulos obtenidos via yt-dlp ({len(segmentos)} segmentos).")
+                        status.info(f"✅ Transcripción obtenida ({len(segmentos)} segmentos)")
+
+            if not segmentos:
                 # Verificar si Whisper está disponible antes de intentar descargar
                 _whisper_disponible = False
                 try:
@@ -1149,11 +1202,11 @@ YOUTUBE_COOKIES = \"\"\"
                     pass
 
                 if not _whisper_disponible:
-                    # En Streamlit Cloud: Whisper no está instalado, no tiene sentido descargar
                     progreso.empty()
                     status.empty()
+                    razon = f"\n\n*Detalle: {error_api}*" if error_api else ""
                     st.error(
-                        "**Este video no tiene subtítulos automáticos en YouTube** y "
+                        "**No se pudieron obtener los subtítulos de este video** y "
                         "Whisper no está disponible en este servidor.\n\n"
                         "**Opciones disponibles:**\n"
                         "1. 📋 **Pega la transcripción manualmente** usando el panel de arriba\n"
@@ -1161,6 +1214,7 @@ YOUTUBE_COOKIES = \"\"\"
                         "(solo funciona ejecutando la app en tu computadora)\n"
                         "3. 🖥️ **Ejecuta la app localmente** en tu Mac con: "
                         "`python3 -m streamlit run app.py`"
+                        + razon
                     )
                     return
 
